@@ -22,13 +22,13 @@ Print parsed information in raw mode (for advanced purposes).
 
 <h3>Dependencies</h3>
 
-YANP is written in pure Python language and it's optimized to parse XML files through xml.minidom library. In order to manage command line, parse data structures and parse XML files, application needs following library:
+YANP is written in pure Python language and it's optimized to parse XML files through lxml.etree library. In order to manage command line, parse data structures and parse XML files, application needs following library:
 
 Python netaddr
 
 Python ArgumentParser
 
-Python Minidom
+Python lxml
 
 <h3>About</h3>
 
