@@ -22,8 +22,7 @@ Copyright (C) 2012
 """
 
 from argparse import ArgumentParser
-from xml.dom.minidom import parse
-from xml.dom import Node
+from lxml import etree
 from pprint import pprint
 from os.path import isdir, exists, basename
 from os import walk
@@ -134,138 +133,154 @@ class nessus_parser:
             # Parse and extract information
             self._parse_results(report)
 
+    @staticmethod
+    def _clear_element(element):
+        # clean up the element since we no longer need it.
+        element.clear()
+        while element.getprevious() is not None:
+            del element.getparent()[0]
+
+    def _extract_host_elements(self, context):
+        # this function will gather up the xml parts we want.
+        for event, element in context:
+            if event == 'end' and element.tag in 'ReportHost':
+                yield element
+                self._clear_element(element)
 
     def _parse_results(self, file_report):
-        
-        # Automatic parse of .nessus file
-        dom = parse(file_report)
-        
-        # For each host in report file, it extracts information
-        for host in dom.getElementsByTagName('ReportHost'):
-            # Get IP address
-            ip = host.getAttribute('name')
-            if ip == "":
-                continue # Error getting IP address, skip!
-            else:
+
+        # Special thanks to:
+        # http://codereview.stackexchange.com/questions/2449/parsing-huge-xml-file-with-lxml-etree-iterparse-in-python
+        context = etree.iterparse(file_report, huge_tree=True, remove_blank_text=True, dtd_validation=False,
+                                  events=("start", "end"))
+
+        for hostCounter, element in enumerate(self._extract_host_elements(context)):
+
+            item_info = {
+                'scan_start':   '',
+                'scan_stop':    '',
+                'os':           '',
+                'hostname':     '',
+                'netbios_name': '',
+                'mac_address':  '',
+                'ip': '',
+            }
+
+            # for some reason i keep getting the "report" element too.
+            # continue if i see it.
+            if element.tag == 'Report':
+                continue
+
+            # make sure the element is formatted properly.
+            ip = element.get('name')
+            if ip is None:
+                continue
+
+            host_properties = element.find('HostProperties')
+            if host_properties is not None:
+
                 self._results[ip] = []
-                
-            # Parse information of selected node
-            for item in host.childNodes:        
-                if item.nodeName == 'HostProperties':
-                    item_info = {
-                        'scan_start':   '',
-                        'scan_stop':    '',
-                        'os':           '',
-                        'hostname':     '',
-                        'netbios_name': '',
-                        'mac_address':  '',
+                host_tags = host_properties.findall('tag')
+                if host_tags is not None:
+                    for host_tag in host_tags:
+                        if host_tag.get("name") == 'HOST_START':
+                            item_info['scan_start'] = host_tag.text
+
+                        if host_tag.get("name") == 'HOST_END':
+                            item_info['scan_stop'] = host_tag.text
+
+                        if host_tag.get("name") == 'operating-system':
+                            item_info['os'] = host_tag.text
+
+                        if host_tag.get("name") == 'host-fqdn':
+                            item_info['hostname'] = host_tag.text
+
+                        if host_tag.get("name") == 'netbios-name':
+                            item_info['netbios_name'] = host_tag.text
+
+                        if host_tag.get("name") == 'mac-address':
+                            item_info['mac_address'] = host_tag.text
+
+                        if host_tag.get("name") == 'host-ip':
+                            item_info['ip'] = host_tag.text
+
+                self._results[ip].append(item_info)
+            else:
+                if ip is not None:
+                    # this means that, for some reason, etree was not able to parse the element.
+                    print "I found IP:", ip, "but there was an empty element."
+
+            report_items = element.findall('ReportItem')
+            data_items = ['description', 'solution', 'plugin_type', 'cvss_base_score', 'cvss_vector',
+                          'exploit_available', 'exploitability_ease', 'exploit_framework_metasploit', 'cve']
+
+            if report_items is not None:
+                for report_item in report_items:
+
+                    vuln = {
+                        'plugin_name':          '',
+                        'plugin_id':            '',
+                        'plugin_type':          '',
+                        'port':                 '',
+                        'protocol':             '',
+                        'description':          '',
+                        'solution':             '',
+                        'service_name':         '',
+                        'cvss_base_score':      '0.0',
+                        'cvss_vector':          '',
+                        'exploit_available':    '',
+                        'metasploit':           '',
+                        'cve':                  '',
                     }
-                    for properties in item.childNodes:
-                        if properties.attributes is None: continue
-                        
-                        # Extract generic information
-                        if properties.getAttribute('name') == 'HOST_START':
-                            item_info['scan_start'] = properties.childNodes[0].nodeValue
-                            
-                        if properties.getAttribute('name') == 'HOST_END':
-                            item_info['scan_stop'] = properties.childNodes[0].nodeValue
-                            
-                        if properties.getAttribute('name') == 'operating-system':
-                            item_info['os'] = properties.childNodes[0].nodeValue
-                            
-                        if properties.getAttribute('name') == 'host-fqdn':
-                            item_info['hostname'] = properties.childNodes[0].nodeValue
-                            
-                        if properties.getAttribute('name') == 'netbios-name':
-                            item_info['netbios_name'] = properties.childNodes[0].nodeValue
-                            
-                        if properties.getAttribute('name') == 'mac-address':
-                            item_info['mac_address'] = properties.childNodes[0].nodeValue
-                            
-                    # Add information extracted to data structure
-                    self._results[ip].append(item_info)
-                                                      
-                # Information extraction
-                if item.nodeName == 'ReportItem':
-                    if item.attributes is None: continue
-                    
                     # Skip specific vulnerability if it is into a blacklist
-                    if item.getAttribute('pluginID') in self._blacklist:
+                    if report_item.get('pluginID') in self._blacklist:
                         self._blacklist_hit += 1
                         continue
-                    
-                    vuln = {
-                        'plugin_name':       '',
-                        'plugin_id':         '',
-                        'plugin_type':       '',
-                        'port':              '',
-                        'protocol':          '',
-                        'description':       '',
-                        'solution':          '',
-                        'service_name':      '',
-                        'cvss_base_score':   '0.0',
-                        'cvss_vector':       '',
-                        'exploit_available': '',
-                        'metasploit':        '',
-                        'cve':               '',
-                        }
 
-                    # Extract generic vulnerability information
-                    vuln['plugin_name'] = item.getAttribute('pluginName')
-                    vuln['plugin_id'] = item.getAttribute('pluginID')
-                    vuln['port'] = item.getAttribute('port')
-                    vuln['protocol'] = item.getAttribute('protocol')
-                    vuln['description'] = item.getAttribute('description')
-                    vuln['service_name'] = item.getAttribute('svc_name')
+                    vuln['plugin_name'] = report_item.get('pluginName')
+                    vuln['plugin_id'] = report_item.get('pluginID')
+                    vuln['port'] = report_item.get('port')
+                    vuln['protocol'] = report_item.get('protocol')
+                    vuln['description'] = report_item.get('description')
+                    vuln['service_name'] = report_item.get('svc_name')
 
-                    # No another information about vulnerability, continue!
-                    if len(item.childNodes) == 0: continue
-                    
-                    # Extract detailed vulnerability information
-                    for details in item.childNodes:
-                        if details.nodeName == 'description':
-                            vuln['description'] = details.childNodes[0].nodeValue
-                            
-                        if details.nodeName == 'solution':
-                            vuln['solution'] = details.childNodes[0].nodeValue
+                    for data_item in data_items:
+                        data = report_item.find(data_item)
+                        if data is not None:
+                            # set the following to false initially.
+                            vuln['exploit_framework_metasploit'] = 'false'
+                            vuln['exploit_available'] = 'false'
+                            vuln['patch_avail'] = 'false'
 
-                        if details.nodeName == 'plugin_type':
-                            vuln['plugin_type'] = details.childNodes[0].nodeValue
-                            
-                        if details.nodeName == 'cvss_base_score':
-                            vuln['cvss_base_score'] = details.childNodes[0].nodeValue
-                            
-                        if details.nodeName == 'cvss_vector':
-                            vuln['cvss_vector'] = details.childNodes[0].nodeValue
+                            if data.tag == 'description':
+                                vuln['description'] = data.text
 
-                        if details.nodeName == 'exploitability_ease' or details.nodeName == 'exploit_available':
-                            if details.childNodes[0].nodeValue.find('true') >= 0 or details.childNodes[0].nodeValue.find('Exploits are available') >= 0:
+                            if data.tag == 'solution':
+                                vuln['solution'] = data.text
+
+                            if data.tag == 'plugin_type':
+                                vuln['plugin_type'] = data.text
+
+                            if data.tag == 'cvss_base_score':
+                                if data.text is not None:
+                                    vuln['cvss_base_score'] = data.text
+
+                            if data.tag == 'cvss_vector':
+                                vuln['cvss_vector'] = data.text
+
+                            if data.tag == 'exploit_available':
                                 vuln['exploit_available'] = 'true'
-                            else:
-                                vuln['exploit_available'] = 'false'
 
-                        if details.nodeName == 'exploit_framework_metasploit':
-                            if details.childNodes[0].nodeValue.find('true') >= 0:
+                            if data.tag == 'exploitability_ease':
+                                vuln['exploit_available'] = 'true'
+
+                            if data.tag == 'exploit_framework_metasploit':
                                 vuln['metasploit'] = 'true'
-                                vuln['exploit_available'] = 'true'
-                            else:
-                                vuln['metasploit'] = 'false'
-                            
-                        if details.nodeName == 'cve':
-                            vuln['cve'] = details.childNodes[0].nodeValue
 
-                    # Store information extracted
+                            if data.tag == 'cve':
+                                vuln['cve'] = data.text
+
                     self._results[ip].append(vuln)
-                    
-                # End 'ReportItem'
-            # End node parsing
-            
-        # Release open resource
-        self._close(dom)
-            
-    def _close(self, dom):
-        if dom:
-            dom.unlink()
             
     def print_raw(self):
         """
@@ -429,7 +444,6 @@ class nessus_parser:
             print "\tInfo vulns:\t\t%d\t[  unique: %6d  ]" % (targets[host]['vuln_info'], len(targets[host]['vuln_info_uniq']))
             print "\tAvailable exploits:\t%d\t[  unique: %6d  ]" % (targets[host]['exploits'], len(targets[host]['exploits_uniq']))
 
-            
     def print_targets(self, fullinfo=False, delim='|'):
         """
         Print targets present into parsed reports
@@ -486,8 +500,7 @@ class nessus_parser:
             mac = self._results[host][0]['mac_address']
             if mac is not '':
                 print "\tMAC: %s" % mac
-            
-            
+
             # Sort vulnerabilities by CVSS score
             for vuln in sorted(self._results[host][1:], key=lambda cvss: float(cvss['cvss_base_score']), reverse=True) :
                 cvss = vuln['cvss_base_score']
