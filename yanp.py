@@ -280,7 +280,7 @@ class nessus_parser:
         """
         Search information by Nessus Plugin ID
         """
-        if len(pluginid) != 5 or not pluginid.isdigit():
+        if len(pluginid) < 5 or len(pluginid) > 6 or not pluginid.isdigit():
             print "[!] PluginID format error."
             exit(4)
         
